@@ -193,6 +193,85 @@ def program_trend(history: pd.DataFrame, bac: pd.DataFrame) -> pd.DataFrame:
     return g.reset_index()
 
 
+HOURS_PATH = Path(__file__).parent / "synthetic_evm_hours.csv"
+CHANGES_PATH = Path(__file__).parent / "synthetic_baseline_changes.csv"
+
+
+def load_hours(path: Path = HOURS_PATH) -> pd.DataFrame:
+    """Load labor hours and labor dollars per work package (cumulative to date)."""
+    hours = pd.read_csv(path, dtype={"WBS_ID": str})
+    required = ["WBS_ID", "BAC_Labor", "BAC_Hrs", "EV_Hrs", "AC_Labor", "AC_Hrs"]
+    missing = [c for c in required if c not in hours.columns]
+    if missing:
+        raise ValueError(f"Hours file missing columns: {missing}")
+    return hours
+
+
+def labor_analysis(hours: pd.DataFrame) -> pd.DataFrame:
+    """Split labor cost variance into an hours (efficiency) piece and a rate piece.
+
+    Planned rate  = BAC_Labor / BAC_Hrs
+    Actual rate   = AC_Labor / AC_Hrs
+    Earned labor  = EV_Hrs x planned rate
+    Usage variance = (EV_Hrs - AC_Hrs) x planned rate     (negative = more hours than earned)
+    Rate variance  = AC_Hrs x planned rate - AC_Labor     (negative = paid more per hour than planned)
+    Usage + Rate   = Labor CV (earned labor minus actual labor)
+    """
+    out = hours.copy()
+    out["Planned_Rate"] = _safe_ratio(out["BAC_Labor"], out["BAC_Hrs"])
+    out["Actual_Rate"] = _safe_ratio(out["AC_Labor"], out["AC_Hrs"])
+    out["EV_Labor"] = out["EV_Hrs"] * out["Planned_Rate"]
+    out["Labor_CV"] = out["EV_Labor"] - out["AC_Labor"]
+    out["Usage_Var"] = (out["EV_Hrs"] - out["AC_Hrs"]) * out["Planned_Rate"]
+    out["Rate_Var"] = out["AC_Hrs"] * out["Planned_Rate"] - out["AC_Labor"]
+    out["Hours_Eff"] = _safe_ratio(out["EV_Hrs"], out["AC_Hrs"])
+    return out
+
+
+def load_changes(path: Path = CHANGES_PATH) -> pd.DataFrame:
+    """Load the baseline change log (budget changes, approved and pending)."""
+    changes = pd.read_csv(path, dtype={"WBS_ID": str})
+    required = ["Change_ID", "Date", "WBS_ID", "Type", "Amount", "Status", "Description"]
+    missing = [c for c in required if c not in changes.columns]
+    if missing:
+        raise ValueError(f"Change log missing columns: {missing}")
+    changes["Amount"] = pd.to_numeric(changes["Amount"], errors="raise")
+    return changes
+
+
+def baseline_summary(changes: pd.DataFrame, data: pd.DataFrame,
+                     mr_remaining: float = MANAGEMENT_RESERVE) -> tuple[dict, pd.DataFrame]:
+    """Walk from the original budget to the current budget.
+
+    Only APPROVED changes are in the current BAC. Pending changes are listed
+    separately. Management reserve transfers move budget out of reserve into a
+    work package, so reserve at the start = reserve remaining + reserve used.
+    """
+    approved = changes[changes["Status"] == "Approved"]
+    net_by_wbs = approved.groupby("WBS_ID")["Amount"].sum()
+
+    walk = data[["WBS_ID", "WBS_Name", "BAC"]].copy()
+    walk["Approved_Changes"] = walk["WBS_ID"].map(net_by_wbs).fillna(0)
+    walk["Original_BAC"] = walk["BAC"] - walk["Approved_Changes"]
+
+    by_type = approved.groupby("Type")["Amount"].sum()
+    pending = changes[changes["Status"] == "Pending"]
+    mr_used = by_type.get("Management Reserve Transfer", 0.0)
+    summary = {
+        "Original_BAC": walk["Original_BAC"].sum(),
+        "Customer_Scope": by_type.get("Scope Addition", 0.0),
+        "Descope": by_type.get("Descope", 0.0),
+        "MR_Used": mr_used,
+        "Approved_Net": walk["Approved_Changes"].sum(),
+        "Current_BAC": walk["BAC"].sum(),
+        "MR_Start": mr_remaining + mr_used,
+        "MR_Remaining": mr_remaining,
+        "Pending_Total": pending["Amount"].sum(),
+        "Pending_Count": len(pending),
+    }
+    return summary, walk
+
+
 def flagged_packages(metrics: pd.DataFrame) -> pd.DataFrame:
     """Return only work packages breaching a CPI or SPI threshold."""
     return metrics[metrics["Flagged"]].reset_index(drop=True)

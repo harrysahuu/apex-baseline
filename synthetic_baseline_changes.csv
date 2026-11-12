@@ -1,0 +1,7 @@
+Change_ID,Date,WBS_ID,Type,Amount,Status,Description
+BCR-001,2026-07-14,1.2.2,Scope Addition,120000,Approved,Customer-directed added interface requirement
+BCR-002,2026-08-20,1.3.1,Management Reserve Transfer,60000,Approved,Management reserve applied to retire a technical risk
+BCR-003,2026-09-09,1.4.2,Scope Addition,50000,Approved,Customer-directed additional test conditions
+BCR-004,2026-09-25,1.1.2,Descope,-30000,Approved,Customer removed an analysis deliverable
+BCR-005,2026-10-15,1.2.1,Management Reserve Transfer,90000,Approved,Management reserve applied to unplanned rework
+BCR-006,2026-11-05,1.3.2,Scope Addition,80000,Pending,"Proposed added software capability, awaiting customer approval"

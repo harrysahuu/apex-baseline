@@ -20,8 +20,12 @@ from engine import (
     SPI_THRESHOLD,
     compute_metrics,
     flagged_packages,
+    baseline_summary,
+    labor_analysis,
+    load_changes,
     load_data,
     load_history,
+    load_hours,
     package_trend,
     program_summary,
     program_trend,
@@ -35,6 +39,11 @@ FORMATS = {
     "VAC": "{:,.0f}", "LRE": "{:,.0f}",
     "CPI": "{:.3f}", "SPI": "{:.3f}", "TCPI_BAC": "{:.3f}", "TCPI_LRE": "{:.3f}",
     "Pct_Complete": "{:.1f}%", "VAC_Pct": "{:+.1f}%",
+    "BAC_Hrs": "{:,.0f}", "EV_Hrs": "{:,.0f}", "AC_Hrs": "{:,.0f}",
+    "Planned_Rate": "${:,.2f}", "Actual_Rate": "${:,.2f}", "Hours_Eff": "{:.3f}",
+    "EV_Labor": "{:,.0f}", "AC_Labor": "{:,.0f}", "Labor_CV": "{:,.0f}",
+    "Usage_Var": "{:,.0f}", "Rate_Var": "{:,.0f}",
+    "Original_BAC": "{:,.0f}", "Approved_Changes": "{:+,.0f}", "Amount": "{:+,.0f}",
 }
 
 
@@ -155,8 +164,8 @@ c4.metric("% Complete", f"{summary['Pct_Complete']:.1f}%")
 c5.metric("Mgmt reserve after VAC", vg.money(summary["MR_After_VAC"]))
 c6.metric("Flagged packages", f"{len(flagged)} of {len(metrics)}")
 
-tab_overview, tab_eac, tab_trend, tab_var = st.tabs(
-    ["Overview", "Estimate at Completion", "Trends", "Variance Reports"]
+tab_overview, tab_eac, tab_trend, tab_labor, tab_var = st.tabs(
+    ["Overview", "Estimate at Completion", "Trends", "Labor & Baseline", "Variance Reports"]
 )
 
 # ----------------------------------------------------------------- overview
@@ -305,6 +314,89 @@ with tab_trend:
             ).properties(height=300)
             st.altair_chart(one_chart, width="stretch")
             st.caption("Packages that finished early show no change in later months.")
+
+with tab_labor:
+    if upload:
+        st.info("Labor and baseline views use the built-in demo files, so they are hidden for uploaded data.")
+    else:
+        try:
+            lab = labor_analysis(load_hours()).merge(df[["WBS_ID", "WBS_Name"]], on="WBS_ID")
+            changes = load_changes()
+            bsum, walk = baseline_summary(changes, df)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load the labor or baseline files: {exc}")
+            st.stop()
+
+        # ---------------- labor
+        st.subheader("Labor: hours vs rate")
+        st.caption(
+            "An overrun can come from people taking more hours than the work earned, "
+            "or from each hour costing more than planned. Knowing which one tells you the fix."
+        )
+        total_cv, total_usage, total_rate = (lab[c].sum() for c in ("Labor_CV", "Usage_Var", "Rate_Var"))
+        eff = lab["EV_Hrs"].sum() / lab["AC_Hrs"].sum()
+        l1, l2, l3, l4 = st.columns(4)
+        l1.metric("Labor cost variance", vg.money(total_cv))
+        l2.metric("From extra hours", vg.money(total_usage))
+        l3.metric("From higher rates", vg.money(total_rate))
+        l4.metric("Hours efficiency", f"{eff:.3f}")
+
+        split = lab.melt(id_vars=["WBS_ID", "WBS_Name"], value_vars=["Usage_Var", "Rate_Var"],
+                         var_name="Cause", value_name="Dollars")
+        split["Cause"] = split["Cause"].map({"Usage_Var": "Hours (efficiency)", "Rate_Var": "Hourly rate"})
+        st.altair_chart(
+            alt.Chart(split).mark_bar().encode(
+                x=alt.X("WBS_ID:N", title="Work package"),
+                y=alt.Y("Dollars:Q", title="Labor variance ($), negative = unfavorable",
+                        axis=alt.Axis(format="~s")),
+                color=alt.Color("Cause:N", legend=alt.Legend(title=None),
+                                scale=alt.Scale(domain=["Hours (efficiency)", "Hourly rate"],
+                                                range=["#B3261E", "#3B6EA5"])),
+                tooltip=["WBS_ID", "WBS_Name", "Cause", alt.Tooltip("Dollars:Q", format=",.0f")],
+            ).properties(height=340),
+            width="stretch",
+        )
+        st.dataframe(
+            styled(lab, ["WBS_ID", "WBS_Name", "BAC_Hrs", "EV_Hrs", "AC_Hrs", "Hours_Eff",
+                         "Planned_Rate", "Actual_Rate", "Labor_CV", "Usage_Var", "Rate_Var"],
+                   lab["Hours_Eff"] < cpi_t),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Red rows are earning less than 0.90 hours of work per hour spent. "
+                   "Labor is assumed to be 65% of cost in this synthetic data.")
+
+        # ---------------- baseline
+        st.subheader("Baseline changes")
+        st.caption(
+            "Only approved changes are in the current budget (BAC). Pending changes are work "
+            "the customer has not yet approved."
+        )
+        b1, b2, b3 = st.columns(3)
+        b1.metric("Original BAC", vg.money(bsum["Original_BAC"]))
+        b2.metric("Approved changes (net)", vg.money(bsum["Approved_Net"]))
+        b3.metric("Current BAC", vg.money(bsum["Current_BAC"]))
+        b4, b5, b6 = st.columns(3)
+        b4.metric("Management reserve used", vg.money(bsum["MR_Used"]),
+                  f"of {vg.money(bsum['MR_Start'])} to start", delta_color="off")
+        b5.metric("Management reserve left", vg.money(bsum["MR_Remaining"]))
+        b6.metric("Pending, not in BAC", vg.money(bsum["Pending_Total"]),
+                  f"{bsum['Pending_Count']} change awaiting approval", delta_color="off")
+
+        st.dataframe(
+            styled(changes, ["Change_ID", "Date", "WBS_ID", "Type", "Amount", "Status", "Description"],
+                   changes["Status"] == "Pending"),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Tinted rows are pending approval.")
+
+        st.markdown("**Budget walk by work package**")
+        st.dataframe(
+            styled(walk, ["WBS_ID", "WBS_Name", "Original_BAC", "Approved_Changes", "BAC"],
+                   walk["Approved_Changes"] != 0),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Tinted rows had approved budget changes. "
+                   "Original BAC + approved changes = current BAC.")
 
 with tab_var:
     st.subheader("Variance Analysis Reports")
