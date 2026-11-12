@@ -15,13 +15,18 @@ import pandas as pd
 import streamlit as st
 
 import var_generator as vg
+from eia748 import GUIDELINES
 from engine import (
     CPI_THRESHOLD,
     SPI_THRESHOLD,
     compute_metrics,
     flagged_packages,
+    INTEGRITY_CHECK_COUNT,
     baseline_summary,
+    earned_schedule_table,
+    integrity_checks,
     labor_analysis,
+    program_earned_schedule,
     load_changes,
     load_data,
     load_history,
@@ -44,6 +49,8 @@ FORMATS = {
     "EV_Labor": "{:,.0f}", "AC_Labor": "{:,.0f}", "Labor_CV": "{:,.0f}",
     "Usage_Var": "{:,.0f}", "Rate_Var": "{:,.0f}",
     "Original_BAC": "{:,.0f}", "Approved_Changes": "{:+,.0f}", "Amount": "{:+,.0f}",
+    "EAC_Weighted": "{:,.0f}", "EAC_Composite": "{:,.0f}", "EAC_Low": "{:,.0f}", "EAC_High": "{:,.0f}",
+    "AT": "{:.0f}", "ES": "{:.2f}", "SPI_t": "{:.3f}", "SV_t": "{:+.2f}",
 }
 
 
@@ -164,8 +171,9 @@ c4.metric("% Complete", f"{summary['Pct_Complete']:.1f}%")
 c5.metric("Mgmt reserve after VAC", vg.money(summary["MR_After_VAC"]))
 c6.metric("Flagged packages", f"{len(flagged)} of {len(metrics)}")
 
-tab_overview, tab_eac, tab_trend, tab_labor, tab_var = st.tabs(
-    ["Overview", "Estimate at Completion", "Trends", "Labor & Baseline", "Variance Reports"]
+tab_overview, tab_eac, tab_trend, tab_labor, tab_integrity, tab_eia, tab_var = st.tabs(
+    ["Overview", "Estimate at Completion", "Trends", "Labor & Baseline",
+     "Data Integrity", "EIA-748 Checklist", "Variance Reports"]
 )
 
 # ----------------------------------------------------------------- overview
@@ -227,6 +235,42 @@ with tab_eac:
         "meaning the manager's estimate may be too optimistic. EAC = AC + (BAC - EV) / CPI."
     )
 
+    st.subheader("Independent forecast range")
+    st.caption(
+        "Three standard statistical methods forecast the final cost: CPI, an 80/20 CPI-SPI blend, "
+        "and CPI x SPI. The bar spans the lowest to highest. A manager's estimate (LRE) far below "
+        "the bar needs a documented basis."
+    )
+    rng = metrics[metrics["EAC_High"] > metrics["EAC_Low"]]
+    bars = alt.Chart(rng).mark_bar(size=16, color="#C9CED6").encode(
+        x=alt.X("WBS_ID:N", title="Work package"),
+        y=alt.Y("EAC_Low:Q", title="Dollars", scale=alt.Scale(zero=False), axis=alt.Axis(format="~s")),
+        y2="EAC_High:Q",
+        tooltip=["WBS_ID", "WBS_Name", alt.Tooltip("EAC_Low:Q", format=",.0f"),
+                 alt.Tooltip("EAC_High:Q", format=",.0f")],
+    )
+    refs = metrics[["WBS_ID", "WBS_Name", "BAC", "LRE"]].melt(
+        id_vars=["WBS_ID", "WBS_Name"], var_name="Reference", value_name="Dollars")
+    refs = refs[refs["WBS_ID"].isin(rng["WBS_ID"])]
+    dots = alt.Chart(refs).mark_point(filled=True, size=110, opacity=1).encode(
+        x="WBS_ID:N", y="Dollars:Q",
+        color=alt.Color("Reference:N", legend=alt.Legend(title=None),
+                        scale=alt.Scale(domain=["BAC", "LRE"], range=["#2E7D6B", "#B3261E"])),
+        shape=alt.Shape("Reference:N", legend=None,
+                        scale=alt.Scale(domain=["BAC", "LRE"], range=["square", "circle"])),
+        tooltip=["WBS_ID", "Reference", alt.Tooltip("Dollars:Q", format=",.0f")],
+    )
+    st.altair_chart((bars + dots).properties(height=380), width="stretch")
+    if "LRE_Position" in metrics.columns:
+        st.dataframe(
+            styled(metrics, ["WBS_ID", "WBS_Name", "BAC", "EAC_Low", "EAC", "EAC_Weighted",
+                             "EAC_Composite", "EAC_High", "LRE", "LRE_Position"],
+                   metrics["LRE_Position"] == "Below range"),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Red rows have a manager's estimate below the whole statistical range. "
+                   "Complete work packages have one value across all methods.")
+
     st.subheader("Program rollup")
     r1, r2, r3, r4 = st.columns(4)
     r1.metric("BAC", vg.money(summary["BAC"]))
@@ -273,6 +317,44 @@ with tab_trend:
                 strokeDash=[5, 5], color="#888"
             ).encode(y="y:Q")
             st.altair_chart((lines + rule).properties(height=340), width="stretch")
+
+            st.subheader("Earned Schedule: how late, in months")
+            st.caption(
+                "Dollar schedule variance always shrinks toward zero as a program finishes, which can "
+                "hide lateness. Earned Schedule measures it in time instead: the month on the plan "
+                "where today's earned value was supposed to be reached."
+            )
+            es_prog = program_earned_schedule(history)
+            now = es_prog.iloc[-1]
+            e1, e2, e3, e4 = st.columns(4)
+            e1.metric("Months elapsed", f"{now['AT']:.0f}")
+            e2.metric("Earned Schedule", f"{now['ES']:.2f} months")
+            e3.metric("Schedule variance (time)", f"{now['SV_t']:+.2f} months")
+            e4.metric("SPI (time) vs SPI ($)", f"{now['SPI_t']:.3f}", f"{now['SPI']:.3f} in dollars",
+                      delta_color="off")
+            es_long = es_prog.melt(id_vars=["Period"], value_vars=["SPI_t", "SPI"],
+                                   var_name="Measure", value_name="Value")
+            es_long["Measure"] = es_long["Measure"].map({"SPI_t": "SPI (time)", "SPI": "SPI (dollars)"})
+            st.altair_chart(
+                alt.Chart(es_long).mark_line(point=True, strokeWidth=3).encode(
+                    x=alt.X("Period:N", title="Month"),
+                    y=alt.Y("Value:Q", scale=alt.Scale(zero=False), title="Index"),
+                    color=alt.Color("Measure:N", legend=alt.Legend(title=None),
+                                    scale=alt.Scale(domain=["SPI (time)", "SPI (dollars)"],
+                                                    range=["#3B6EA5", "#9AA5B1"])),
+                    tooltip=["Period", "Measure", alt.Tooltip("Value:Q", format=".3f")],
+                ).properties(height=300),
+                width="stretch",
+            )
+            es_pkg = earned_schedule_table(history, df)
+            st.dataframe(
+                styled(es_pkg[~es_pkg["Complete"]].reset_index(drop=True),
+                       ["WBS_ID", "WBS_Name", "AT", "ES", "SV_t", "SPI_t"],
+                       es_pkg[~es_pkg["Complete"]].reset_index(drop=True)["SPI_t"] < spi_t),
+                width="stretch", hide_index=True,
+            )
+            st.caption("AT = months elapsed. ES = Earned Schedule in months. SV(t) is months ahead (+) "
+                       "or behind (-). Completed packages are left out. Red rows are below the SPI threshold.")
 
             st.subheader("Forecast over time")
             st.caption(
@@ -397,6 +479,87 @@ with tab_labor:
         )
         st.caption("Tinted rows had approved budget changes. "
                    "Original BAC + approved changes = current BAC.")
+
+with tab_integrity:
+    st.subheader("Data integrity checks")
+    st.caption(
+        "Before any number is trusted, the inputs are scanned for impossible or suspicious values. "
+        "Errors must be fixed. Warnings deserve a second look."
+    )
+    if upload:
+        st.info("Integrity checks on uploaded data run against the main file only.")
+        found = integrity_checks(df)
+    else:
+        try:
+            chk_hist, chk_hours = load_history(), load_hours()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load supporting files: {exc}")
+            chk_hist, chk_hours = None, None
+        chk_df = df
+        demo_fail = st.checkbox("Show me what failed checks look like (injects sample errors into a copy)")
+        if demo_fail and chk_hist is not None:
+            chk_df = df.copy()
+            chk_df.loc[chk_df["WBS_ID"] == "1.3.3", "EV"] = 0
+            chk_df.loc[chk_df["WBS_ID"] == "1.2.2", "LRE"] = 600000
+            chk_hist = chk_hist.copy()
+            chk_hist.loc[(chk_hist["WBS_ID"] == "1.2.1") & (chk_hist["Period"] == "2026-09"), "EV"] = 100000
+            chk_hours = chk_hours.copy()
+            chk_hours.loc[chk_hours["WBS_ID"] == "1.1.2", "AC_Labor"] = 999999
+        found = integrity_checks(chk_df, chk_hist, chk_hours)
+
+    n_err = int((found["Severity"] == "Error").sum())
+    n_warn = int((found["Severity"] == "Warning").sum())
+    i1, i2, i3 = st.columns(3)
+    i1.metric("Checks run", INTEGRITY_CHECK_COUNT)
+    i2.metric("Errors", n_err)
+    i3.metric("Warnings", n_warn)
+    if found.empty:
+        st.success("All checks passed. No impossible or suspicious values found.")
+    else:
+        st.dataframe(
+            found.style.apply(
+                lambda row: ["background-color: rgba(179, 38, 30, 0.18)" if row["Severity"] == "Error"
+                             else "background-color: rgba(214, 158, 46, 0.22)"] * len(row), axis=1),
+            width="stretch", hide_index=True,
+        )
+        st.caption("Red rows are errors. Amber rows are warnings.")
+
+with tab_eia:
+    st.subheader("EIA-748 self-assessment")
+    st.warning(
+        "This is a working checklist, not a compliance certification. Guideline wording is a short "
+        "paraphrase. Use the official standard and your contract for the real text.",
+        icon="⚠️",
+    )
+    guide = pd.DataFrame(GUIDELINES, columns=["#", "Category", "Guideline (summary)",
+                                              "Tool support", "How it is covered"])
+    guide["Your status"] = "Not assessed"
+    guide["Notes"] = ""
+
+    counts = guide["Tool support"].value_counts()
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Guidelines", len(guide))
+    g2.metric("Fully supported", int(counts.get("Supported", 0)))
+    g3.metric("Partly supported", int(counts.get("Partial", 0)))
+    g4.metric("Not covered", int(counts.get("Not covered", 0)))
+    st.caption("Most gaps are process or organizational matters (indirect costs, material accounting, "
+               "organization structure) or need data this demo does not have yet, such as a schedule.")
+
+    cats = ["All"] + list(dict.fromkeys(guide["Category"]))
+    pick = st.radio("Category", cats, horizontal=True)
+    view = guide if pick == "All" else guide[guide["Category"] == pick]
+    edited = st.data_editor(
+        view, hide_index=True, width="stretch", key=f"eia_{pick}",
+        disabled=["#", "Category", "Guideline (summary)", "Tool support", "How it is covered"],
+        column_config={
+            "Your status": st.column_config.SelectboxColumn(
+                options=["Not assessed", "Not started", "In progress", "Satisfied"], required=True),
+            "Notes": st.column_config.TextColumn(width="medium"),
+        },
+    )
+    st.download_button("Download this view as CSV", edited.to_csv(index=False),
+                       file_name="eia748_assessment.csv", mime="text/csv")
+    st.caption("Your status and notes last until you close or refresh the page. Download to keep them.")
 
 with tab_var:
     st.subheader("Variance Analysis Reports")

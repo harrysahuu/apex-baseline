@@ -98,6 +98,12 @@ def compute_metrics(
     out["EAC"] = (out["AC"] + remaining_work / cpi_safe).fillna(out["BAC"])
     composite = (out["CPI"] * out["SPI"]).replace(0, np.nan)
     out["EAC_Composite"] = (out["AC"] + remaining_work / composite).fillna(out["EAC"])
+    # 80/20 weighted method: remaining work performs at 80% CPI and 20% SPI
+    weighted = (0.8 * out["CPI"] + 0.2 * out["SPI"]).replace(0, np.nan)
+    out["EAC_Weighted"] = (out["AC"] + remaining_work / weighted).fillna(out["EAC"])
+    statistical = out[["EAC", "EAC_Weighted", "EAC_Composite"]]
+    out["EAC_Low"] = statistical.min(axis=1)
+    out["EAC_High"] = statistical.max(axis=1)
     out["ETC"] = out["EAC"] - out["AC"]
     out["VAC"] = out["BAC"] - out["EAC"]
     out["VAC_Pct"] = _safe_ratio(out["VAC"], out["BAC"]) * 100
@@ -113,6 +119,11 @@ def compute_metrics(
         out["TCPI_LRE"] = (remaining_work / to_go_lre).where(has_work_left)
         out["LRE_Gap"] = out["EAC"] - out["LRE"]  # positive = LRE more optimistic than EAC
         out["LRE_Optimistic"] = _safe_ratio(out["LRE_Gap"], out["BAC"]) >= lre_gap_threshold
+        tolerance = 0.01 * out["BAC"]  # 1% of BAC of wiggle room before calling it outside the range
+        out["LRE_Position"] = np.where(
+            out["LRE"] < out["EAC_Low"] - tolerance, "Below range",
+            np.where(out["LRE"] > out["EAC_High"] + tolerance, "Above range", "Within range"),
+        )
 
     # Current period (last reporting period only)
     if {"CP_PV", "CP_EV", "CP_AC"} <= set(out.columns):
@@ -145,6 +156,8 @@ def program_summary(metrics: pd.DataFrame) -> dict:
         "CV": ev - ac,
         "SV": ev - pv,
         "EAC": eac,
+        "EAC_Low": metrics["EAC_Low"].sum(),
+        "EAC_High": metrics["EAC_High"].sum(),
         "ETC": eac - ac,
         "VAC": vac,
         "VAC_Pct": vac / bac * 100 if bac else float("nan"),
@@ -270,6 +283,130 @@ def baseline_summary(changes: pd.DataFrame, data: pd.DataFrame,
         "Pending_Count": len(pending),
     }
     return summary, walk
+
+
+def _earned_schedule(pv_curve: list[float], ev: float) -> float:
+    """Earned Schedule: the time at which the planned value curve equalled today's earned value.
+
+    pv_curve[t] is cumulative PV at the end of month t, with pv_curve[0] = 0.
+    Interpolates inside the month where PV crosses EV. If EV is beyond the whole
+    plan, extends the curve using the last month's planned pace.
+    """
+    if ev <= 0:
+        return 0.0
+    for i in range(1, len(pv_curve)):
+        if pv_curve[i] >= ev:
+            prior = pv_curve[i - 1]
+            return (i - 1) + (ev - prior) / (pv_curve[i] - prior)
+    last = len(pv_curve) - 1
+    pace = pv_curve[last] - pv_curve[last - 1]
+    return last + (ev - pv_curve[last]) / pace if pace > 0 else float(last)
+
+
+def earned_schedule_table(history: pd.DataFrame, data: pd.DataFrame) -> pd.DataFrame:
+    """Earned Schedule per work package: ES, SPI(t) and SV(t) in months.
+
+    Completed packages (EV at 100% of BAC) are marked Complete and have no value,
+    because their time-based schedule performance is already settled.
+    """
+    periods = history["Period"].nunique()
+    bac = data.set_index("WBS_ID")["BAC"]
+    rows = []
+    for wbs, g in history.sort_values("Period").groupby("WBS_ID"):
+        ev = float(g["EV"].iloc[-1])
+        complete = ev >= bac[wbs] * 0.999
+        es = np.nan if complete else _earned_schedule([0.0] + g["PV"].tolist(), ev)
+        rows.append({
+            "WBS_ID": wbs, "AT": periods, "ES": es,
+            "SPI_t": es / periods if not complete else np.nan,
+            "SV_t": es - periods if not complete else np.nan,
+            "Complete": complete,
+        })
+    out = pd.DataFrame(rows)
+    return out.merge(data[["WBS_ID", "WBS_Name"]], on="WBS_ID")
+
+
+def program_earned_schedule(history: pd.DataFrame) -> pd.DataFrame:
+    """Program-level ES, SPI(t) and dollar SPI for each month."""
+    g = history.groupby("Period")[["PV", "EV"]].sum().sort_index()
+    curve = [0.0] + g["PV"].tolist()
+    rows = []
+    for i, (period, r) in enumerate(g.iterrows(), start=1):
+        es = _earned_schedule(curve, float(r["EV"]))
+        rows.append({"Period": period, "AT": i, "ES": es, "SPI_t": es / i,
+                     "SV_t": es - i, "SPI": r["EV"] / r["PV"]})
+    return pd.DataFrame(rows)
+
+
+INTEGRITY_CHECK_COUNT = 11
+
+
+def integrity_checks(data: pd.DataFrame, history: pd.DataFrame | None = None,
+                     hours: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Scan the inputs for impossible or suspicious values. Returns one row per issue.
+
+    Errors are impossible values that must be fixed before the numbers can be trusted.
+    Warnings are unusual values worth a second look.
+    """
+    issues: list[dict] = []
+
+    def add(severity: str, check: str, wbs: str, detail: str) -> None:
+        issues.append({"Severity": severity, "Check": check, "WBS_ID": wbs, "Detail": detail})
+
+    for _, r in data.iterrows():
+        w = r["WBS_ID"]
+        if r["EV"] > r["BAC"]:
+            add("Error", "EV exceeds BAC", w, f"EV {r['EV']:,.0f} is above budget {r['BAC']:,.0f}")
+        if r["PV"] > r["BAC"]:
+            add("Error", "PV exceeds BAC", w, f"PV {r['PV']:,.0f} is above budget {r['BAC']:,.0f}")
+        if r["AC"] > 0 and r["EV"] == 0:
+            add("Warning", "Cost with no earned value", w, f"AC {r['AC']:,.0f} but EV is zero")
+        if r["EV"] > 0 and r["AC"] == 0:
+            add("Warning", "Earned value with no cost", w, f"EV {r['EV']:,.0f} but AC is zero")
+        if r["AC"] > 0 and r["EV"] > 0:
+            cpi = r["EV"] / r["AC"]
+            if cpi < 0.5 or cpi > 1.5:
+                add("Warning", "Extreme CPI", w, f"CPI of {cpi:.2f} is unusually far from 1.0")
+        if "LRE" in data.columns and pd.notna(r.get("LRE")) and r["LRE"] < r["AC"]:
+            add("Error", "Estimate below actual cost", w,
+                f"LRE {r['LRE']:,.0f} is less than the {r['AC']:,.0f} already spent")
+        for cum, cur in (("PV", "CP_PV"), ("EV", "CP_EV"), ("AC", "CP_AC")):
+            if cur in data.columns and pd.notna(r.get(cur)) and r[cur] > r[cum]:
+                add("Error", "Current period exceeds cumulative", w,
+                    f"{cur} {r[cur]:,.0f} is more than cumulative {cum} {r[cum]:,.0f}")
+
+    if history is not None:
+        for wbs, g in history.sort_values("Period").groupby("WBS_ID"):
+            for col in ("PV", "EV", "AC"):
+                drops = g.loc[g[col].diff() < 0, "Period"].tolist()
+                if drops:
+                    add("Error", "Cumulative value decreases", wbs,
+                        f"Cumulative {col} goes down in {', '.join(drops)}")
+        last = history[history["Period"] == history["Period"].max()].set_index("WBS_ID")
+        cur = data.set_index("WBS_ID")
+        for wbs in cur.index:
+            if wbs not in last.index:
+                add("Error", "History does not match current data", wbs, "No history for this package")
+                continue
+            diffs = [c for c in ("PV", "EV", "AC") if last.at[wbs, c] != cur.at[wbs, c]]
+            if diffs:
+                add("Error", "History does not match current data", wbs,
+                    f"Latest month differs from current data in {', '.join(diffs)}")
+
+    if hours is not None:
+        merged = hours.merge(data[["WBS_ID", "AC"]], on="WBS_ID")
+        for _, r in merged.iterrows():
+            if r["AC_Labor"] > r["AC"]:
+                add("Error", "Labor cost exceeds total cost", r["WBS_ID"],
+                    f"Labor {r['AC_Labor']:,.0f} is more than total AC {r['AC']:,.0f}")
+            if r["EV_Hrs"] > r["BAC_Hrs"]:
+                add("Error", "Earned hours exceed budgeted hours", r["WBS_ID"],
+                    f"EV hours {r['EV_Hrs']:,.0f} are above budgeted hours {r['BAC_Hrs']:,.0f}")
+
+    out = pd.DataFrame(issues, columns=["Severity", "Check", "WBS_ID", "Detail"])
+    order = {"Error": 0, "Warning": 1}
+    return out.sort_values(["Severity", "WBS_ID"], key=lambda s: s.map(order) if s.name == "Severity" else s
+                           ).reset_index(drop=True)
 
 
 def flagged_packages(metrics: pd.DataFrame) -> pd.DataFrame:

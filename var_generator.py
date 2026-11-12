@@ -119,6 +119,12 @@ def eac_assessment(row: dict) -> str:
         f"with {row['Pct_Spent']:.0f}% of budget spent."
     ]
 
+    if _num(row, "EAC_Low") is not None and _num(row, "EAC_High") is not None:
+        parts.append(
+            f"Independent estimates (CPI, weighted and composite methods) range from "
+            f"{money(row['EAC_Low'])} to {money(row['EAC_High'])}."
+        )
+
     lre = _num(row, "LRE")
     if lre is not None:
         gap = row["LRE_Gap"]
