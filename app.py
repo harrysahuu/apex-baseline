@@ -163,13 +163,14 @@ if not upload:
     )
 
 # ---------------------------------------------------------------- KPI row
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3 = st.columns(3)
 c1.metric("Program CPI", f"{summary['CPI']:.3f}", f"{summary['CPI'] - cpi_t:+.3f} vs threshold")
 c2.metric("Program SPI", f"{summary['SPI']:.3f}", f"{summary['SPI'] - spi_t:+.3f} vs threshold")
-c3.metric("EAC", vg.money(summary["EAC"]), vg.money(summary["VAC"]) + " vs BAC")
-c4.metric("% Complete", f"{summary['Pct_Complete']:.1f}%")
-c5.metric("Mgmt reserve after VAC", vg.money(summary["MR_After_VAC"]))
-c6.metric("Flagged packages", f"{len(flagged)} of {len(metrics)}")
+c3.metric("Flagged packages", f"{len(flagged)} of {len(metrics)}")
+c4, c5, c6 = st.columns(3)
+c4.metric("Estimate at completion (EAC)", vg.money(summary["EAC"]), vg.money(summary["VAC"]) + " vs budget")
+c5.metric("Management reserve after overrun", vg.money(summary["MR_After_VAC"]))
+c6.metric("% complete", f"{summary['Pct_Complete']:.1f}%")
 
 tab_overview, tab_eac, tab_trend, tab_labor, tab_integrity, tab_eia, tab_var = st.tabs(
     ["Overview", "Estimate at Completion", "Trends", "Labor & Baseline",
