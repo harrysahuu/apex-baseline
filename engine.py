@@ -157,6 +157,42 @@ def program_summary(metrics: pd.DataFrame) -> dict:
     }
 
 
+HISTORY_PATH = Path(__file__).parent / "synthetic_evm_history.csv"
+
+
+def load_history(path: Path = HISTORY_PATH) -> pd.DataFrame:
+    """Load monthly cumulative PV/EV/AC per work package (one row per package per period)."""
+    hist = pd.read_csv(path, dtype={"WBS_ID": str, "Period": str})
+    missing = [c for c in ["Period", "WBS_ID", "PV", "EV", "AC"] if c not in hist.columns]
+    if missing:
+        raise ValueError(f"History file missing columns: {missing}")
+    return hist.sort_values(["Period", "WBS_ID"]).reset_index(drop=True)
+
+
+def package_trend(history: pd.DataFrame) -> pd.DataFrame:
+    """CPI and SPI for every work package in every period."""
+    out = history.copy()
+    out["CPI"] = _safe_ratio(out["EV"], out["AC"])
+    out["SPI"] = _safe_ratio(out["EV"], out["PV"])
+    return out
+
+
+def program_trend(history: pd.DataFrame, bac: pd.DataFrame) -> pd.DataFrame:
+    """Program-level CPI, SPI, EAC and VAC for each period.
+
+    `bac` needs columns WBS_ID and BAC. EAC is the sum of work package EACs
+    (CPI method), the same way program_summary() does it for the latest period.
+    """
+    h = history.merge(bac[["WBS_ID", "BAC"]], on="WBS_ID", how="left")
+    cpi = _safe_ratio(h["EV"], h["AC"])
+    h["EAC"] = (h["AC"] + (h["BAC"] - h["EV"]) / cpi.replace(0, np.nan)).fillna(h["BAC"])
+    g = h.groupby("Period")[["BAC", "PV", "EV", "AC", "EAC"]].sum()
+    g["CPI"] = g["EV"] / g["AC"]
+    g["SPI"] = g["EV"] / g["PV"]
+    g["VAC"] = g["BAC"] - g["EAC"]
+    return g.reset_index()
+
+
 def flagged_packages(metrics: pd.DataFrame) -> pd.DataFrame:
     """Return only work packages breaching a CPI or SPI threshold."""
     return metrics[metrics["Flagged"]].reset_index(drop=True)

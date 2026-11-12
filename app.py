@@ -21,7 +21,10 @@ from engine import (
     compute_metrics,
     flagged_packages,
     load_data,
+    load_history,
+    package_trend,
     program_summary,
+    program_trend,
 )
 
 st.set_page_config(page_title="Apex Baseline", layout="wide")
@@ -152,7 +155,9 @@ c4.metric("% Complete", f"{summary['Pct_Complete']:.1f}%")
 c5.metric("Mgmt reserve after VAC", vg.money(summary["MR_After_VAC"]))
 c6.metric("Flagged packages", f"{len(flagged)} of {len(metrics)}")
 
-tab_overview, tab_eac, tab_var = st.tabs(["Overview", "Estimate at Completion", "Variance Reports"])
+tab_overview, tab_eac, tab_trend, tab_var = st.tabs(
+    ["Overview", "Estimate at Completion", "Trends", "Variance Reports"]
+)
 
 # ----------------------------------------------------------------- overview
 with tab_overview:
@@ -226,6 +231,81 @@ with tab_eac:
         )
 
 # ---------------------------------------------------------------------- VARs
+with tab_trend:
+    if upload:
+        st.info("Trends use the built-in monthly history, so they are hidden for uploaded data.")
+    else:
+        try:
+            history = load_history()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load the monthly history: {exc}")
+            history = None
+
+        if history is not None:
+            prog = program_trend(history, df)
+            pkg = package_trend(history)
+
+            st.subheader("Program performance over time")
+            st.caption(
+                "CPI and SPI each month, cumulative to date. "
+                "The dashed line is the flag threshold; falling toward or below it means trouble."
+            )
+            idx = prog.melt(id_vars=["Period"], value_vars=["CPI", "SPI"],
+                            var_name="Index", value_name="Value")
+            lines = alt.Chart(idx).mark_line(point=True, strokeWidth=3).encode(
+                x=alt.X("Period:N", title="Month"),
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False), title="Index"),
+                color=alt.Color("Index:N", legend=alt.Legend(title=None),
+                                scale=alt.Scale(domain=["CPI", "SPI"],
+                                                range=["#B3261E", "#3B6EA5"])),
+                tooltip=["Period", "Index", alt.Tooltip("Value:Q", format=".3f")],
+            )
+            rule = alt.Chart(pd.DataFrame({"y": [cpi_t]})).mark_rule(
+                strokeDash=[5, 5], color="#888"
+            ).encode(y="y:Q")
+            st.altair_chart((lines + rule).properties(height=340), width="stretch")
+
+            st.subheader("Forecast over time")
+            st.caption(
+                "EAC is the projected final cost. When it climbs above the budget line "
+                "(BAC), the program is forecast to overrun."
+            )
+            fc = prog.melt(id_vars=["Period"], value_vars=["BAC", "EAC"],
+                           var_name="Measure", value_name="Dollars")
+            fc_chart = alt.Chart(fc).mark_line(point=True, strokeWidth=3).encode(
+                x=alt.X("Period:N", title="Month"),
+                y=alt.Y("Dollars:Q", scale=alt.Scale(zero=False),
+                        axis=alt.Axis(format="~s"), title="Dollars"),
+                color=alt.Color("Measure:N", legend=alt.Legend(title=None),
+                                scale=alt.Scale(domain=["BAC", "EAC"],
+                                                range=["#9AA5B1", "#B3261E"])),
+                strokeDash=alt.StrokeDash("Measure:N", legend=None,
+                                          scale=alt.Scale(domain=["BAC", "EAC"],
+                                                          range=[[5, 5], [1, 0]])),
+                tooltip=["Period", "Measure", alt.Tooltip("Dollars:Q", format=",.0f")],
+            ).properties(height=340)
+            st.altair_chart(fc_chart, width="stretch")
+
+            st.subheader("Single work package")
+            choices = df["WBS_ID"] + "  " + df["WBS_Name"]
+            default = int(metrics["CPI"].idxmin())
+            picked = st.selectbox("Work package", choices, index=default)
+            wbs = picked.split("  ")[0]
+            one = pkg[pkg["WBS_ID"] == wbs].melt(
+                id_vars=["Period"], value_vars=["CPI", "SPI"],
+                var_name="Index", value_name="Value",
+            ).dropna()
+            one_chart = alt.Chart(one).mark_line(point=True, strokeWidth=3).encode(
+                x=alt.X("Period:N", title="Month"),
+                y=alt.Y("Value:Q", scale=alt.Scale(zero=False), title="Index"),
+                color=alt.Color("Index:N", legend=alt.Legend(title=None),
+                                scale=alt.Scale(domain=["CPI", "SPI"],
+                                                range=["#B3261E", "#3B6EA5"])),
+                tooltip=["Period", "Index", alt.Tooltip("Value:Q", format=".3f")],
+            ).properties(height=300)
+            st.altair_chart(one_chart, width="stretch")
+            st.caption("Packages that finished early show no change in later months.")
+
 with tab_var:
     st.subheader("Variance Analysis Reports")
     if flagged.empty:
