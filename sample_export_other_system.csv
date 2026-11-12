@@ -1,0 +1,9 @@
+Control Account,Description,Responsible Org,BCWS ($K),BCWP ($K),ACWP ($K),Budget at Completion ($K),Manager EAC ($K),Notes
+CA-100,Ground Antenna Array,Org A,"$1,900.0","$1,650.0","$2,050.0","$3,200.0","$3,300.0",Reflector delivery slipped
+CA-110,Signal Processing,Org B,"$1,500.0","$1,480.0","$1,450.0","$2,400.0","$2,380.0",
+CA-120,Mission Software,Org C,"$2,300.0","$2,050.0","$2,300.0","$4,100.0","$4,250.0",Requirements growth
+CA-130,Network Integration,Org B,"$900.0","$880.0","$905.0","$1,800.0","$1,830.0",
+CA-140,Cyber Hardening,Org D,"$600.0","$420.0","$470.0","$1,250.0","$1,300.0",Staffing gap
+CA-150,Facility Build-out,Org E,"$2,600.0","$2,550.0","$2,640.0","$2,900.0","$2,950.0",
+CA-160,Test and Acceptance,Org A,"$300.0","$310.0","$295.0","$1,500.0","$1,480.0",
+CA-170,Program Management,Org F,"$700.0","$700.0","$735.0","$1,100.0","$1,140.0",

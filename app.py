@@ -9,15 +9,18 @@ interactive page. All data is synthetic.
 
 import io
 import os
+from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
+import importer as imp
 import var_generator as vg
 from eia748 import GUIDELINES
 from engine import (
     CPI_THRESHOLD,
+    MANAGEMENT_RESERVE,
     SPI_THRESHOLD,
     compute_metrics,
     flagged_packages,
@@ -128,13 +131,12 @@ with st.sidebar:
     st.header("Settings")
     cpi_t = st.slider("CPI threshold", 0.70, 1.00, float(CPI_THRESHOLD), 0.01)
     spi_t = st.slider("SPI threshold", 0.70, 1.00, float(SPI_THRESHOLD), 0.01)
-    upload = None
-    if PRIVATE_MODE:
-        upload = st.file_uploader("Use your own CSV (optional)", type="csv")
-        st.caption(
-            "Needs columns: WBS_ID, WBS_Name, BAC, PV, EV, AC. "
-            "Optional: CP_PV, CP_EV, CP_AC, LRE."
-        )
+    if st.session_state.get("custom_df") is not None:
+        st.warning(f"Showing: {st.session_state.get('custom_name', 'your data')}")
+        if st.button("Back to the demo program", key="reset_sidebar"):
+            for k in ("custom_df", "custom_name", "custom_mr"):
+                st.session_state.pop(k, None)
+            st.rerun()
     st.divider()
     if has_key:
         st.success("API key found. Claude drafts the VARs.")
@@ -144,19 +146,29 @@ with st.sidebar:
         st.info("Public demo: synthetic data, template-drafted reports.")
 
 # --------------------------------------------------------------------- data
+custom_df = st.session_state.get("custom_df")  # numbers the user typed or imported
+using_custom = custom_df is not None
 try:
-    df = load_data(upload) if upload else load_data()
+    df = custom_df.copy() if using_custom else load_data()
 except Exception as exc:  # noqa: BLE001 - show any data problem in plain words
     st.error(f"Could not load the data: {exc}")
     st.stop()
 
 metrics = compute_metrics(df, cpi_t, spi_t)
-summary = program_summary(metrics)
+reserve = float(st.session_state.get("custom_mr", 0.0)) if using_custom else MANAGEMENT_RESERVE
+summary = program_summary(metrics, reserve)
 flagged = flagged_packages(metrics)
+data_key = int(pd.util.hash_pandas_object(df.astype(str), index=False).sum())
 
 st.title("Apex Baseline")
 st.caption("Program control and earned value engine  |  Modeled on EIA-748 and public IPMR guidance")
-if not upload:
+if using_custom:
+    st.info(
+        f"Showing your data: {st.session_state.get('custom_name', 'your data')}. "
+        "Trends and Labor & Baseline need monthly history, hours and change files, so they are "
+        "hidden for this data. Use 'Back to the demo program' in the sidebar to return."
+    )
+else:
     st.warning(
         "DEMO: all figures are synthetic. No real program, contractor, or contract data.",
         icon="⚠️",
@@ -172,8 +184,8 @@ c4.metric("Estimate at completion (EAC)", vg.money(summary["EAC"]), vg.money(sum
 c5.metric("Management reserve after overrun", vg.money(summary["MR_After_VAC"]))
 c6.metric("% complete", f"{summary['Pct_Complete']:.1f}%")
 
-tab_overview, tab_eac, tab_trend, tab_labor, tab_integrity, tab_eia, tab_var = st.tabs(
-    ["Overview", "Estimate at Completion", "Trends", "Labor & Baseline",
+tab_overview, tab_data, tab_eac, tab_trend, tab_labor, tab_integrity, tab_eia, tab_var = st.tabs(
+    ["Overview", "Your Data", "Estimate at Completion", "Trends", "Labor & Baseline",
      "Data Integrity", "EIA-748 Checklist", "Variance Reports"]
 )
 
@@ -250,7 +262,8 @@ with tab_eac:
         tooltip=["WBS_ID", "WBS_Name", alt.Tooltip("EAC_Low:Q", format=",.0f"),
                  alt.Tooltip("EAC_High:Q", format=",.0f")],
     )
-    refs = metrics[["WBS_ID", "WBS_Name", "BAC", "LRE"]].melt(
+    ref_cols = [c for c in ("BAC", "LRE") if c in metrics.columns]
+    refs = metrics[["WBS_ID", "WBS_Name"] + ref_cols].melt(
         id_vars=["WBS_ID", "WBS_Name"], var_name="Reference", value_name="Dollars")
     refs = refs[refs["WBS_ID"].isin(rng["WBS_ID"])]
     dots = alt.Chart(refs).mark_point(filled=True, size=110, opacity=1).encode(
@@ -286,8 +299,9 @@ with tab_eac:
 
 # ---------------------------------------------------------------------- VARs
 with tab_trend:
-    if upload:
-        st.info("Trends use the built-in monthly history, so they are hidden for uploaded data.")
+    if using_custom:
+        st.info("Trends need a monthly history file, so they are hidden for your data. "
+                "Switch back to the demo program to see them.")
     else:
         try:
             history = load_history()
@@ -399,8 +413,9 @@ with tab_trend:
             st.caption("Packages that finished early show no change in later months.")
 
 with tab_labor:
-    if upload:
-        st.info("Labor and baseline views use the built-in demo files, so they are hidden for uploaded data.")
+    if using_custom:
+        st.info("Labor and baseline views need hours and change-log files, so they are hidden for "
+                "your data. Switch back to the demo program to see them.")
     else:
         try:
             lab = labor_analysis(load_hours()).merge(df[["WBS_ID", "WBS_Name"]], on="WBS_ID")
@@ -481,14 +496,141 @@ with tab_labor:
         st.caption("Tinted rows had approved budget changes. "
                    "Original BAC + approved changes = current BAC.")
 
+with tab_data:
+    st.subheader("Bring your own data")
+    st.caption(
+        "This is how a company's numbers get into Apex Baseline. Type numbers directly, or import "
+        "an export from another system. Either way, the data is cleaned and checked first, and then "
+        "every tab recomputes from it."
+    )
+    if PRIVATE_MODE:
+        st.info("Private mode: files are processed in this session only.")
+    else:
+        st.warning(
+            "Public demo: use sample or made-up numbers only. Do not enter real, proprietary, or "
+            "export-controlled data here. In a real deployment, the data stays inside the "
+            "customer's own environment.",
+            icon="⚠️",
+        )
+    if using_custom:
+        st.success(f"Currently showing: {st.session_state.get('custom_name')} "
+                   f"({len(custom_df)} work packages).")
+        if st.button("Go back to the demo program", key="reset_tab"):
+            for k in ("custom_df", "custom_name", "custom_mr"):
+                st.session_state.pop(k, None)
+            st.rerun()
+
+    def show_issues(issues: pd.DataFrame, blocked: bool) -> None:
+        n_err = int((issues["Severity"] == "Error").sum())
+        n_warn = int((issues["Severity"] == "Warning").sum())
+        k1, k2 = st.columns(2)
+        k1.metric("Errors", n_err)
+        k2.metric("Warnings", n_warn)
+        if issues.empty:
+            st.success("All checks passed.")
+            return
+        st.dataframe(
+            issues.style.apply(
+                lambda row: ["background-color: rgba(179, 38, 30, 0.18)" if row["Severity"] == "Error"
+                             else "background-color: rgba(214, 158, 46, 0.22)"] * len(row), axis=1),
+            width="stretch", hide_index=True,
+        )
+        if blocked:
+            st.error("Fix the errors above before this data can be loaded.")
+
+    def load_custom(name: str, data: pd.DataFrame, mr: float) -> None:
+        st.session_state["custom_df"] = data
+        st.session_state["custom_name"] = name
+        st.session_state["custom_mr"] = mr
+        st.rerun()
+
+    t_type, t_import = st.tabs(["Type your own numbers", "Import a file"])
+
+    # ---- type numbers
+    with t_type:
+        st.caption(
+            "Change any number, add a row at the bottom, or delete one. Then press the button and "
+            "watch the whole dashboard follow your numbers."
+        )
+        editor_cols = ["WBS_ID", "WBS_Name", "BAC", "PV", "EV", "AC", "LRE"]
+        base = custom_df if using_custom else load_data()
+        base = base.reindex(columns=editor_cols)
+        money_cfg = {c: st.column_config.NumberColumn(format="%.0f", min_value=0)
+                     for c in ["BAC", "PV", "EV", "AC", "LRE"]}
+        typed = st.data_editor(
+            base, num_rows="dynamic", hide_index=True, width="stretch",
+            column_config=money_cfg, key=f"editor_{st.session_state.get('custom_name', 'demo')}",
+        )
+        mr_typed = st.number_input("Management reserve ($, optional)", min_value=0.0, value=0.0,
+                                   step=10000.0, key="mr_typed")
+        st.caption("PV, EV and AC are cumulative to date. LRE is the manager's own estimate and may be left blank.")
+        if st.button("Use these numbers", type="primary", key="use_typed"):
+            ds, issues, blocked = imp.build_dataset(typed, {c: c for c in editor_cols}, 1.0)
+            show_issues(issues, blocked)
+            if not blocked and ds is not None:
+                load_custom("Numbers you typed", ds, mr_typed)
+
+    # ---- import a file
+    with t_import:
+        st.caption(
+            "Other systems export with their own column names, units and number formats. Apex Baseline "
+            "recognises the common ones, cleans the numbers, and checks everything before loading."
+        )
+        raw, src = None, None
+        if PRIVATE_MODE:
+            up = st.file_uploader("Upload a CSV export", type="csv", key="import_up")
+            if up is not None:
+                try:
+                    raw, src = imp.read_raw(up), up.name
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not read that file: {exc}")
+        if raw is None:
+            st.markdown("**Try it with a sample export from a fictional other system**")
+            st.download_button("Download the sample file", imp.SAMPLE_EXPORT.read_bytes(),
+                               file_name="sample_export_other_system.csv", mime="text/csv")
+            st.caption("Note the different column names (BCWS, BCWP, ACWP), dollar signs, and amounts in thousands.")
+            if st.checkbox("Load the sample export", key="use_sample"):
+                raw, src = imp.read_raw(imp.SAMPLE_EXPORT), "sample_export_other_system.csv"
+
+        if raw is not None:
+            st.markdown("**Step 1. What was in the file**")
+            st.dataframe(raw.head(12), width="stretch", hide_index=True)
+
+            st.markdown("**Step 2. Match the columns**")
+            st.caption("Apex Baseline guessed the matches below. Change any that are wrong.")
+            suggested = imp.suggest_mapping(list(raw.columns))
+            options = ["(not in file)"] + list(raw.columns)
+            mapping: dict[str, str | None] = {}
+            grid = st.columns(2)
+            for n, field in enumerate(imp.FIELDS):
+                default = options.index(suggested[field]) if suggested[field] in options else 0
+                pick = grid[n % 2].selectbox(imp.LABELS[field], options, index=default,
+                                             key=f"map_{src}_{field}")
+                mapping[field] = None if pick == "(not in file)" else pick
+            unit_names = list(imp.UNIT_MULTIPLIER)
+            u1, u2 = st.columns(2)
+            unit = u1.selectbox("Money units in the file", unit_names,
+                                index=unit_names.index(imp.detect_units(mapping)), key=f"unit_{src}")
+            mr_import = u2.number_input("Management reserve ($, optional)", min_value=0.0, value=0.0,
+                                        step=10000.0, key=f"mr_{src}")
+
+            st.markdown("**Step 3. Checks**")
+            ds, issues, blocked = imp.build_dataset(raw, mapping, imp.UNIT_MULTIPLIER[unit])
+            show_issues(issues, blocked)
+
+            st.markdown("**Step 4. Load it**")
+            if st.button("Load into the dashboard", type="primary", key="use_import",
+                         disabled=blocked or ds is None):
+                load_custom(src, ds, mr_import)
+
 with tab_integrity:
     st.subheader("Data integrity checks")
     st.caption(
         "Before any number is trusted, the inputs are scanned for impossible or suspicious values. "
         "Errors must be fixed. Warnings deserve a second look."
     )
-    if upload:
-        st.info("Integrity checks on uploaded data run against the main file only.")
+    if using_custom:
+        st.info("For your data, the checks that need history or hours files are skipped.")
         found = integrity_checks(df)
     else:
         try:
@@ -571,7 +713,7 @@ with tab_var:
             f"{len(flagged)} work packages breach the thresholds. "
             "Generate draft reports for each one."
         )
-        key = (round(cpi_t, 2), round(spi_t, 2), upload.name if upload else "default")
+        key = (round(cpi_t, 2), round(spi_t, 2), data_key)
 
         if st.button("Generate variance reports", type="primary"):
             reports = []

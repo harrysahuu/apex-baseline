@@ -140,7 +140,7 @@ def compute_metrics(
     return out
 
 
-def program_summary(metrics: pd.DataFrame) -> dict:
+def program_summary(metrics: pd.DataFrame, management_reserve: float = MANAGEMENT_RESERVE) -> dict:
     """Roll up to program level. EAC is the bottom-up sum of work package EACs."""
     bac, pv, ev, ac = (metrics[c].sum() for c in ("BAC", "PV", "EV", "AC"))
     eac = metrics["EAC"].sum()
@@ -164,9 +164,9 @@ def program_summary(metrics: pd.DataFrame) -> dict:
         "Pct_Complete": ev / bac * 100 if bac else float("nan"),
         "TCPI_BAC": (bac - ev) / to_go if to_go > 0 else float("nan"),
         "LRE": metrics["LRE"].sum() if "LRE" in metrics.columns else float("nan"),
-        "MR": MANAGEMENT_RESERVE,
+        "MR": management_reserve,
         # Reserve left if it were used to cover any projected overrun
-        "MR_After_VAC": MANAGEMENT_RESERVE + min(vac, 0),
+        "MR_After_VAC": management_reserve + min(vac, 0),
     }
 
 
