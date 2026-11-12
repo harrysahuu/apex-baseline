@@ -99,22 +99,30 @@ def eac_chart(m: pd.DataFrame) -> alt.Chart:
 
 
 # ------------------------------------------------------------------ sidebar
-has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+# PUBLIC DEMO vs PRIVATE USE
+# On a public website, strangers could upload real data or run up your API bill.
+# So uploads and AI drafting are OFF unless APEX_PRIVATE_MODE=1 is set on YOUR machine.
+PRIVATE_MODE = os.environ.get("APEX_PRIVATE_MODE") == "1"
+has_key = PRIVATE_MODE and bool(os.environ.get("ANTHROPIC_API_KEY"))
 
 with st.sidebar:
     st.header("Settings")
     cpi_t = st.slider("CPI threshold", 0.70, 1.00, float(CPI_THRESHOLD), 0.01)
     spi_t = st.slider("SPI threshold", 0.70, 1.00, float(SPI_THRESHOLD), 0.01)
-    upload = st.file_uploader("Use your own CSV (optional)", type="csv")
-    st.caption(
-        "Needs columns: WBS_ID, WBS_Name, BAC, PV, EV, AC. "
-        "Optional: CP_PV, CP_EV, CP_AC, LRE."
-    )
+    upload = None
+    if PRIVATE_MODE:
+        upload = st.file_uploader("Use your own CSV (optional)", type="csv")
+        st.caption(
+            "Needs columns: WBS_ID, WBS_Name, BAC, PV, EV, AC. "
+            "Optional: CP_PV, CP_EV, CP_AC, LRE."
+        )
     st.divider()
     if has_key:
         st.success("API key found. Claude drafts the VARs.")
-    else:
+    elif PRIVATE_MODE:
         st.info("No API key found. VARs use the built-in template.")
+    else:
+        st.info("Public demo: synthetic data, template-drafted reports.")
 
 # --------------------------------------------------------------------- data
 try:
@@ -128,7 +136,12 @@ summary = program_summary(metrics)
 flagged = flagged_packages(metrics)
 
 st.title("Apex Baseline")
-st.caption("Program control and earned value engine  |  Synthetic data only")
+st.caption("Program control and earned value engine  |  Modeled on EIA-748 and public IPMR guidance")
+if not upload:
+    st.warning(
+        "DEMO: all figures are synthetic. No real program, contractor, or contract data.",
+        icon="⚠️",
+    )
 
 # ---------------------------------------------------------------- KPI row
 c1, c2, c3, c4, c5, c6 = st.columns(6)
