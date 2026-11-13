@@ -185,9 +185,11 @@ c4.metric("Estimate at completion (EAC)", vg.money(summary["EAC"]), vg.money(sum
 c5.metric("Management reserve after overrun", vg.money(summary["MR_After_VAC"]))
 c6.metric("% complete", f"{summary['Pct_Complete']:.1f}%")
 
-tab_overview, tab_data, tab_eac, tab_trend, tab_labor, tab_sched, tab_integrity, tab_eia, tab_var = st.tabs(
+(tab_overview, tab_data, tab_eac, tab_trend, tab_labor, tab_sched, tab_integrity, tab_eia, tab_var,
+ tab_auto, tab_about) = st.tabs(
     ["Overview", "Your Data", "Estimate at Completion", "Trends", "Labor & Baseline",
-     "Schedule Health", "Data Integrity", "EIA-748 Checklist", "Variance Reports"]
+     "Schedule Health", "Data Integrity", "EIA-748 Checklist", "Variance Reports",
+     "Monthly Automation", "About & Roadmap"]
 )
 
 # ----------------------------------------------------------------- overview
@@ -805,3 +807,117 @@ with tab_var:
                 vg.render_markdown(reports, summary),
                 file_name="var_reports.md",
             )
+
+# ---------------------------------------------------------- monthly automation
+def _set_status(idx: int, status: str) -> None:
+    st.session_state["queue"][idx]["status"] = status
+
+
+with tab_auto:
+    st.subheader("Monthly automation (preview)")
+    st.info(
+        "This shows the cycle a private deployment runs by itself each month. In this public demo you press the "
+        "button yourself and it uses the numbers on screen. In a real deployment the data arrives from the "
+        "customer's own systems and the cycle runs on a schedule, inside their environment."
+    )
+    cycle_key = (round(cpi_t, 2), round(spi_t, 2), data_key)
+
+    if st.button("Run the monthly cycle", type="primary"):
+        log = []
+        try:
+            if using_custom:
+                found_a = integrity_checks(df)
+            else:
+                found_a = integrity_checks(df, load_history(), load_hours())
+            n_e, n_w = int((found_a["Severity"] == "Error").sum()), int((found_a["Severity"] == "Warning").sum())
+        except Exception as exc:  # noqa: BLE001
+            n_e, n_w = -1, -1
+            log.append(("Step 2: Data checks", f"Could not run: {exc}"))
+        log.insert(0, ("Step 1: Data received", f"{len(df)} work packages loaded from "
+                       f"{'your data' if using_custom else 'the demo program'}."))
+        if n_e >= 0:
+            log.append(("Step 2: Data checks", f"{n_e} errors, {n_w} warnings."))
+        if using_custom:
+            log.append(("Step 3: Schedule health", "Skipped: imported cost data has no schedule."))
+        else:
+            ss_a = schedule_summary(schedule_checks(load_schedule()))
+            log.append(("Step 3: Schedule health", f"{ss_a['passed']} of {ss_a['ran']} checks passed, "
+                        f"{ss_a['failed']} failed."))
+        log.append(("Step 4: Analysis", f"Program CPI {summary['CPI']:.3f}, SPI {summary['SPI']:.3f}, "
+                    f"EAC {vg.money(summary['EAC'])}. {len(flagged)} packages breach the thresholds."))
+        queue = []
+        for row in flagged.to_dict("records"):
+            draft, mode = vg.generate_var(row, has_key)
+            queue.append({"row": row, "draft": draft, "mode": mode, "status": "Waiting for review"})
+        log.append(("Step 5: Drafts written", f"{len(queue)} variance reports drafted and sent to review."))
+        st.session_state["auto_log"] = log
+        st.session_state["queue"] = queue
+        st.session_state["auto_key"] = cycle_key
+
+    queue = st.session_state.get("queue")
+    if st.session_state.get("auto_log"):
+        if st.session_state.get("auto_key") != cycle_key:
+            st.warning("Settings or data changed since this cycle ran. Run it again.")
+        for title, detail in st.session_state["auto_log"]:
+            st.markdown(f"**{title}**  \n{detail}")
+    if queue and st.session_state.get("auto_key") == cycle_key:
+        st.divider()
+        st.markdown("**Step 6: Review queue.** Each draft goes to the person who owns that work package. "
+                    "They approve it or send it back.")
+        for i, item in enumerate(queue):
+            row = item["row"]
+            with st.container(border=True):
+                head, badge = st.columns([4, 1])
+                head.markdown(f"**VAR-{i + 1:03d}  |  {row['WBS_ID']}  {row['WBS_Name']}**  \n"
+                              f"{vg.classify(row)} breach, CPI {row['CPI']:.3f}, SPI {row['SPI']:.3f}")
+                badge.markdown(f"**{item['status']}**")
+                with st.expander("Read the draft"):
+                    st.markdown("**Root cause**")
+                    st.write(item["draft"]["root_cause"])
+                    st.markdown("**Impact**")
+                    st.write(item["draft"]["impact"])
+                    st.markdown("**Corrective action**")
+                    st.write(item["draft"]["corrective_action"])
+                b1, b2, _ = st.columns([1, 1, 4])
+                b1.button("Approve", key=f"approve_{i}", on_click=_set_status, args=(i, "Approved"))
+                b2.button("Send back", key=f"back_{i}", on_click=_set_status, args=(i, "Sent back for edits"))
+        approved = [q for q in queue if q["status"] == "Approved"]
+        st.markdown(f"**{len(approved)} of {len(queue)} approved.**")
+        if approved:
+            st.download_button("Download approved reports (Markdown)",
+                               vg.render_markdown(approved, summary), file_name="approved_var_reports.md")
+    elif not st.session_state.get("auto_log"):
+        st.caption("Press the button to run the six steps.")
+
+
+# ----------------------------------------------------------------- about
+with tab_about:
+    st.subheader("About and roadmap")
+    st.markdown(
+        "Apex Baseline automates the analysis and the first draft of program finance reporting: the earned "
+        "value math, threshold flags, data and schedule checks, and variance report drafts. A person supplies "
+        "the data and reviews the result. It is built on public standards (EIA-748, public IPMR guidance, "
+        "standard EVM formulas) and uses only synthetic data."
+    )
+    st.markdown("**What is built, what is a preview, what is not built**")
+    st.dataframe(pd.DataFrame([
+        ("EVM math, flags, forecast range, Earned Schedule", "Built"),
+        ("Data integrity checks and schedule health checks", "Built"),
+        ("Variance report drafts, Word and Markdown export", "Built (template drafted)"),
+        ("Type or import your own numbers", "Built (sample import in this public demo)"),
+        ("Monthly automation cycle with review queue", "Preview (button-driven)"),
+        ("AI-written reports", "Built, off in this public demo"),
+        ("Automatic data connection to customer systems", "Not built"),
+        ("Scheduled runs, logins, saved history, audit trail", "Not built"),
+        ("Secure hosting for controlled data (NIST 800-171 / CMMC)", "Not built"),
+        ("Testing on a real program", "Not done"),
+    ], columns=["Capability", "Status"]), width="stretch", hide_index=True)
+    st.markdown("**Path to fully automatic**")
+    st.markdown(
+        "1. Pilot in one customer's own environment, with their data landing in a folder.  \n"
+        "2. Scheduled monthly runs.  \n"
+        "3. AI-drafted reports with analyst approval.  \n"
+        "4. Direct connections to the customer's cost and schedule systems.  \n"
+        "5. Security, compliance, logins and audit trail."
+    )
+    st.caption("All data in this demo is synthetic. No real program, contractor, or contract data.")

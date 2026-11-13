@@ -16,3 +16,13 @@ Enables CSV upload and Claude-drafted reports (needs `pip install anthropic`
 and an ANTHROPIC_API_KEY):
     set APEX_PRIVATE_MODE=1        (Windows cmd)
     $env:APEX_PRIVATE_MODE="1"     (PowerShell)
+
+## What is in the dashboard
+Overview, Your Data (type or import numbers), Estimate at Completion, Trends,
+Labor & Baseline, Schedule Health, Data Integrity, EIA-748 Checklist, Variance
+Reports, Monthly Automation (preview), About & Roadmap.
+
+## Scope
+This is a demonstration on synthetic data. It has no logins, saved history or
+compliance hosting, and has not been tested on a real program. Do not enter real
+or controlled data into a public deployment.
