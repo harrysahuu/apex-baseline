@@ -18,6 +18,7 @@ import streamlit as st
 import importer as imp
 import var_generator as vg
 from eia748 import GUIDELINES
+from schedule import load_schedule, schedule_checks, schedule_summary
 from engine import (
     CPI_THRESHOLD,
     MANAGEMENT_RESERVE,
@@ -184,9 +185,9 @@ c4.metric("Estimate at completion (EAC)", vg.money(summary["EAC"]), vg.money(sum
 c5.metric("Management reserve after overrun", vg.money(summary["MR_After_VAC"]))
 c6.metric("% complete", f"{summary['Pct_Complete']:.1f}%")
 
-tab_overview, tab_data, tab_eac, tab_trend, tab_labor, tab_integrity, tab_eia, tab_var = st.tabs(
+tab_overview, tab_data, tab_eac, tab_trend, tab_labor, tab_sched, tab_integrity, tab_eia, tab_var = st.tabs(
     ["Overview", "Your Data", "Estimate at Completion", "Trends", "Labor & Baseline",
-     "Data Integrity", "EIA-748 Checklist", "Variance Reports"]
+     "Schedule Health", "Data Integrity", "EIA-748 Checklist", "Variance Reports"]
 )
 
 # ----------------------------------------------------------------- overview
@@ -622,6 +623,45 @@ with tab_data:
             if st.button("Load into the dashboard", type="primary", key="use_import",
                          disabled=blocked or ds is None):
                 load_custom(src, ds, mr_import)
+
+with tab_sched:
+    st.subheader("Schedule health")
+    st.caption(
+        "A program can look fine on cost and still have an unreliable schedule. These checks follow the "
+        "publicly documented 14-point style of schedule assessment, using the commonly published thresholds."
+    )
+    if using_custom:
+        st.info("Schedule checks use a task list, which the cost import does not include. "
+                "Press 'Back to the demo program' in the sidebar to see them on the demo schedule.")
+    else:
+        try:
+            sched = load_schedule()
+            sched_checks = schedule_checks(sched)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not read the schedule: {exc}")
+            sched_checks = None
+        if sched_checks is not None:
+            ss = schedule_summary(sched_checks)
+            h1, h2, h3 = st.columns(3)
+            h1.metric("Checks passed", f"{ss['passed']} of {ss['ran']}")
+            h2.metric("Checks failed", ss["failed"])
+            h3.metric("Tasks in schedule", len(sched))
+            st.dataframe(
+                sched_checks.style.apply(
+                    lambda row: ["background-color: rgba(179, 38, 30, 0.18)" if row["Status"] == "Fail"
+                                 else "background-color: rgba(46, 125, 50, 0.15)" if row["Status"] == "Pass"
+                                 else ""] * len(row), axis=1),
+                width="stretch", hide_index=True,
+            )
+            st.caption(
+                "Red = fails the threshold, green = passes. Check 12 (critical path test) needs a full scheduling "
+                "engine and is not run. Demo schedule is fictional."
+            )
+            with st.expander("Show the demo schedule"):
+                shown = sched.drop(columns=["Done"]).copy()
+                for c in ("Start", "Finish", "Baseline_Finish", "Actual_Finish"):
+                    shown[c] = shown[c].dt.strftime("%Y-%m-%d").fillna("")
+                st.dataframe(shown, width="stretch", hide_index=True)
 
 with tab_integrity:
     st.subheader("Data integrity checks")
